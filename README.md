@@ -8,6 +8,14 @@
 - `images/` — сюда кладется готовый `.img` для записи
 - `output/` — сюда складываются артефакты сборки
 
+## Готовая сборка 
+
+Cобран на базе образа с официального сайта: http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-Pi-4-Pro.html
+
+Сам образ с сайта: https://drive.google.com/drive/folders/1TcFAGTblG_gbDhwFotEWS0y78LwHA-VG
+
+**Готовый образ с добаввлением tun для работы VPN в режиме tun:** https://drive.google.com/file/d/1a_j_Tk7itNPX_aXFVuQDruUpBevp3GTX/view?usp=sharing
+
 ## Что собирается
 
 Целевая платформа:
