@@ -1,129 +1,119 @@
 # orangepi4pro-image
 
-Отдельная директория для сборки и записи кастомного образа `Orange Pi 4 Pro`.
+Простая репа для сборки стабильного образа `Orange Pi 4 Pro` через Docker.
 
-Внутри:
-- `build-image.sh` — сборка `kernel` или полного `image` через Docker
-- `flash-sd.sh` — запись `.img` на SD-карту
-- `images/` — сюда кладется готовый `.img` для записи
-- `output/` — сюда складываются артефакты сборки
+Пользовательские команды только три:
+- `./build.sh` — интерактивная сборка образа
+- `./flash.sh` — запись готового `.img` на SD
+- `./format.sh` — форматирование диска
 
-## Готовая сборка 
+Остальные скрипты спрятаны в `scripts/`.
 
-Cобран на базе образа с официального сайта: http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-Pi-4-Pro.html
+## Что тут решено
 
-Сам образ с сайта: https://drive.google.com/drive/folders/1TcFAGTblG_gbDhwFotEWS0y78LwHA-VG
+По текущему диагнозу основная проблема платы была не в `LAN` и не в `sing-box`, а во встроенном Wi-Fi/BT стеке `AIC8800`.
 
-**Готовый образ с добаввлением tun для работы VPN в режиме tun:** https://drive.google.com/file/d/1a_j_Tk7itNPX_aXFVuQDruUpBevp3GTX/view?usp=sharing
+Для стабильного сценария по умолчанию репа делает так:
+- вырезает `AIC8800` из kernel config
+- переводит образ в безопасный профиль `safe-lan`
+- не поднимает опасный AP-стек (`hostapd`, `dnsmasq`)
+- добавляет запасной USB Wi-Fi вариант `ath9k_htc` как модуль
 
-## Что собирается
-
-Целевая платформа:
-- Board: `orangepi4pro`
-- Branch: `legacy`
-- Release: `jammy`
-- Kernel: `5.15.147`
-- Дополнение: `CONFIG_TUN=m`
-
-Скрипт сборки повторяет рабочую схему, на которой уже был собран образ:
-- Docker volume для case-sensitive source tree
-- `ubuntu:22.04` внутри контейнера
-- фиксы для старого `u-boot`
-- привилегированный контейнер для финальной сборки `.img`
+Это не “починка” `AIC8800`.
+Это стабильный workaround для нормального boot и предсказуемой сети.
 
 ## Требования
 
-На хосте:
+На хосте нужен только:
 - Docker
-- локальная директория `../orangepi-build`
 
-Если `orangepi-build` еще не клонирован:
+Локальный `../orangepi-build` не обязателен.
+Если он есть рядом, сборщик использует его.
+Если нет, контейнер сам клонирует upstream `orangepi-build`.
 
-```bash
-git clone --depth=1 https://github.com/orangepi-xunlong/orangepi-build
-```
-
-Структура рядом должна быть такой:
-
-```text
-orangepi/
-├── orangepi-build/
-└── orangepi4pro-image/
-```
-
-## Сборка полного образа
+## Быстрый старт
 
 ```bash
+git clone git@github.com:makrelbka/orangepi4pro-image.git
 cd orangepi4pro-image
-./build-image.sh image
+./build.sh
 ```
 
-Результат:
-- `output/output/images/Orangepi4pro_.../*.img`
+`build.sh` спросит:
+1. Какую систему собрать: `Debian Bullseye` или `Ubuntu Jammy`
+2. Нужен ли `TUN`
+3. Оставлять ли рискованный встроенный Wi-Fi или использовать стабильный профиль
 
-## Сборка только kernel пакетов
+Что важно:
+- `Debian Bullseye` сейчас основной и проверенный вариант
+- `Ubuntu Jammy` оставлен, но протестирован меньше
+
+## Политика Wi-Fi
+
+Рекомендуемый режим в `build.sh`:
+- `Stable LAN + reserve USB Wi-Fi`
+
+Что он делает:
+- отключает встроенный `AIC8800`
+- включает `ath9k_htc` для USB-адаптеров на `Atheros AR9271`
+- оставляет `NetworkManager`
+- не поднимает AP-сервисы, которые могли устроить сетевой шторм
+
+Почему именно так:
+- встроенный `AIC8800` уже показал нестабильный boot
+- `ath9k_htc` это старый, но очень стабильный upstream Linux-драйвер
+- USB Wi-Fi при этом есть “про запас”, но сам не ломает систему, пока адаптер не подключён
+
+Если нужен рискованный stock-вариант:
+- в `build.sh` можно выбрать `Stock risky Wi-Fi`
+- тогда встроенный `AIC8800` остаётся
+- этот режим не рекомендуется
+
+## TUN
+
+`build.sh` отдельно спрашивает, нужен ли `TUN`.
+
+Включай `TUN`, если нужен:
+- `sing-box`
+- `OpenVPN`
+- любой VPN в режиме `tun`
+
+Если VPN через `tun` не нужен, его можно не включать.
+
+## Результат сборки
+
+После сборки:
+- артефакты лежат в `output/`
+- готовый `.img` автоматически копируется в `images/`
+
+## Запись на SD
 
 ```bash
-cd orangepi4pro-image
-./build-image.sh kernel
-```
-
-Результат:
-- `output/output/debs/`
-
-## Дополнительные аргументы сборки
-
-Можно передавать любые дополнительные аргументы `orangepi-build` после режима:
-
-```bash
-./build-image.sh image CLEAN_LEVEL=make,oldcache
-./build-image.sh kernel BUILD_KSRC=yes
-```
-
-## Подготовка образа к записи
-
-Скопируй нужный `.img` в папку `images/`:
-
-```bash
-cp output/output/images/Orangepi4pro_*/Orangepi4pro_*.img images/
-```
-
-## Запись на SD-карту
-
-```bash
-cd orangepi4pro-image
-./flash-sd.sh
+./flash.sh
 ```
 
 Скрипт:
-- покажет найденные `.img`
-- покажет доступные диски
-- попросит явное подтверждение
-- запишет образ на выбранную SD-карту
+- покажет готовые образы из `images/`
+- даст выбрать диск
+- попросит подтверждение
+- запишет образ на SD
 
-На macOS используется `diskutil` и запись в `/dev/rdiskX`.
-На Linux используется `lsblk` и `dd`.
-
-## Проверка после загрузки
-
-На Orange Pi:
+## Форматирование
 
 ```bash
-grep CONFIG_TUN /boot/config-$(uname -r)
-sudo modprobe tun
-ls -l /dev/net/tun
+./format.sh
 ```
 
-Ожидаемо:
+## Внутренняя структура
 
-```text
-CONFIG_TUN=m
-```
+Служебные вещи спрятаны сюда:
+- `scripts/internal/` — низкоуровневые скрипты сборки и записи
+- `scripts/postprocess-image-safe-lan.sh` — offline правка готового `.img`
+- `output/` — build artifacts
+- `images/` — образы для записи
 
-и `/dev/net/tun` должен существовать.
+## Примечания
 
-## Замечания
-
-- `output/` специально оставлен внутри этой директории, чтобы артефакты были локальны для проекта
-- `images/` не очищается автоматически
-- если Docker Desktop на macOS ломает runtime, сначала чини Docker, потом запускай сборку
+- Сборка остаётся через Docker
+- Основной упор здесь на стабильность, не на встроенный Wi-Fi
+- Если когда-то понадобится реально лечить `AIC8800`, это надо делать уже в upstream/vendor kernel tree, а не в этом wrapper-проекте

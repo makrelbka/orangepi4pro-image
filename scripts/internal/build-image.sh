@@ -6,19 +6,21 @@ shift || true
 EXTRA_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/orangepi-build"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+WORKSPACE_DIR="$(cd "${PROJECT_DIR}/.." && pwd)"
+BUILD_DIR="${WORKSPACE_DIR}/orangepi-build"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-ubuntu:22.04}"
 SRC_VOLUME="orangepi-build-src"
-ARTIFACTS_DIR="${SCRIPT_DIR}/output"
+ARTIFACTS_DIR="${PROJECT_DIR}/output"
 KERNEL_CONFIG_NAME="linux-sun60iw2-legacy-a733"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/arm64}"
-
-if [[ ! -d "${BUILD_DIR}" ]]; then
-  echo "Error: directory not found: ${BUILD_DIR}"
-  echo "Clone orangepi-build into ${ROOT_DIR} first."
-  exit 1
-fi
+IMAGE_RELEASE_DEFAULT="${IMAGE_RELEASE:-jammy}"
+IMAGE_PROFILE="${IMAGE_PROFILE:-safe-lan}"
+AIC8800_POLICY="${AIC8800_POLICY:-auto}"
+USB_WIFI_PROFILE="${USB_WIFI_PROFILE:-none}"
+TUN_POLICY="${TUN_POLICY:-enable}"
+PROJECT_MOUNT="/host-project"
+HOST_SRC_MOUNT="/host-src"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Error: docker not found in PATH"
@@ -28,13 +30,24 @@ fi
 mkdir -p "${ARTIFACTS_DIR}"
 
 BUILD_ARGS=(BOARD=orangepi4pro BRANCH=legacy KERNEL_CONFIGURE=no)
+EXTRA_RELEASE_SET="no"
+for arg in "${EXTRA_ARGS[@]}"; do
+  if [[ "${arg}" == RELEASE=* ]]; then
+    EXTRA_RELEASE_SET="yes"
+    break
+  fi
+done
+
 case "${MODE}" in
   kernel)
     BUILD_ARGS+=(BUILD_OPT=kernel)
     RESULT_HINT="Kernel deb packages: ${ARTIFACTS_DIR}/output/debs/"
     ;;
   image)
-    BUILD_ARGS+=(BUILD_OPT=image RELEASE=jammy BUILD_DESKTOP=no BUILD_MINIMAL=no)
+    BUILD_ARGS+=(BUILD_OPT=image BUILD_DESKTOP=no BUILD_MINIMAL=no)
+    if [[ "${EXTRA_RELEASE_SET}" == "no" ]]; then
+      BUILD_ARGS+=("RELEASE=${IMAGE_RELEASE_DEFAULT}")
+    fi
     RESULT_HINT="Full image: ${ARTIFACTS_DIR}/output/images/"
     ;;
   *)
@@ -88,11 +101,21 @@ DOCKER_RUN_ARGS=(
   --entrypoint /bin/bash
   -v "${SRC_VOLUME}:/work"
   -v "${ARTIFACTS_DIR}:/host-out"
+  -v "${PROJECT_DIR}:${PROJECT_MOUNT}:ro"
   -v orangepi-cache:/work/cache
   -v orangepi-ccache:/root/.ccache
+  -e AIC8800_POLICY="${AIC8800_POLICY}"
+  -e USB_WIFI_PROFILE="${USB_WIFI_PROFILE}"
+  -e TUN_POLICY="${TUN_POLICY}"
+  -e BUILD_MODE="${MODE}"
+  -e IMAGE_PROFILE="${IMAGE_PROFILE}"
   -e KERNEL_CONFIG_NAME="${KERNEL_CONFIG_NAME}"
   -e BUILD_ARGS_STR="${BUILD_ARGS_STR}"
 )
+
+if [[ -d "${BUILD_DIR}" ]]; then
+  DOCKER_RUN_ARGS+=(-v "${BUILD_DIR}:${HOST_SRC_MOUNT}:ro")
+fi
 
 if [[ "${MODE}" == "image" ]]; then
   DOCKER_RUN_ARGS+=(
@@ -120,10 +143,14 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 if [[ ! -d /work/.git ]]; then
-  git clone --depth=1 https://github.com/orangepi-xunlong/orangepi-build /tmp/orangepi-build
-  shopt -s dotglob
-  mv /tmp/orangepi-build/* /work/
-  rm -rf /tmp/orangepi-build
+  if [[ -d /host-src/.git ]]; then
+    rsync -a --delete /host-src/ /work/
+  else
+    git clone --depth=1 https://github.com/orangepi-xunlong/orangepi-build /tmp/orangepi-build
+    shopt -s dotglob
+    mv /tmp/orangepi-build/* /work/
+    rm -rf /tmp/orangepi-build
+  fi
 fi
 
 cd /work
@@ -163,13 +190,72 @@ if [[ ! -f "userpatches/${KERNEL_CONFIG_NAME}.config" ]]; then
   cp "external/config/kernel/${KERNEL_CONFIG_NAME}.config" "userpatches/${KERNEL_CONFIG_NAME}.config"
 fi
 
-if grep -q '^CONFIG_TUN=' "userpatches/${KERNEL_CONFIG_NAME}.config"; then
-  sed -i -E 's/^CONFIG_TUN=.*/CONFIG_TUN=m/' "userpatches/${KERNEL_CONFIG_NAME}.config"
-elif grep -q '^# CONFIG_TUN is not set$' "userpatches/${KERNEL_CONFIG_NAME}.config"; then
-  sed -i 's/^# CONFIG_TUN is not set$/CONFIG_TUN=m/' "userpatches/${KERNEL_CONFIG_NAME}.config"
+set_kconfig_tristate() {
+  local symbol="$1"
+  local value="$2"
+  local file="userpatches/${KERNEL_CONFIG_NAME}.config"
+
+  sed -i -E "/^${symbol}=|^# ${symbol} is not set$/d" "${file}"
+
+  case "${value}" in
+    y|m)
+      printf '%s=%s\n' "${symbol}" "${value}" >> "${file}"
+      ;;
+    n)
+      printf '# %s is not set\n' "${symbol}" >> "${file}"
+      ;;
+    *)
+      echo "Unsupported tristate value for ${symbol}: ${value}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+if [[ "${TUN_POLICY}" == "enable" ]]; then
+  set_kconfig_tristate CONFIG_TUN m
 else
-  printf '\nCONFIG_TUN=m\n' >> "userpatches/${KERNEL_CONFIG_NAME}.config"
+  set_kconfig_tristate CONFIG_TUN n
 fi
+
+disable_aic8800="no"
+if [[ "${AIC8800_POLICY}" == "disable" ]]; then
+  disable_aic8800="yes"
+elif [[ "${AIC8800_POLICY}" == "auto" && "${BUILD_MODE}" == "image" && "${IMAGE_PROFILE}" != "stock" && "${IMAGE_PROFILE}" != "off" ]]; then
+  disable_aic8800="yes"
+fi
+
+if [[ "${disable_aic8800}" == "yes" ]]; then
+  for sym in \
+    CONFIG_AIC8800_WLAN_SUPPORT \
+    CONFIG_AIC8800_BTLPM_SUPPORT \
+    CONFIG_AIC_WLAN_SUPPORT \
+    CONFIG_AIC_INTF_SDIO
+  do
+    if grep -q "^${sym}=" "userpatches/${KERNEL_CONFIG_NAME}.config"; then
+      sed -i -E "s/^${sym}=.*/# ${sym} is not set/" "userpatches/${KERNEL_CONFIG_NAME}.config"
+    elif ! grep -q "^# ${sym} is not set$" "userpatches/${KERNEL_CONFIG_NAME}.config"; then
+      printf '# %s is not set\n' "${sym}" >> "userpatches/${KERNEL_CONFIG_NAME}.config"
+    fi
+  done
+fi
+
+case "${USB_WIFI_PROFILE}" in
+  none)
+    ;;
+  ath9k)
+    for sym in \
+      CONFIG_ATH9K_HW \
+      CONFIG_ATH9K_COMMON \
+      CONFIG_ATH9K_HTC
+    do
+      set_kconfig_tristate "${sym}" m
+    done
+    ;;
+  *)
+    echo "Unsupported USB_WIFI_PROFILE: ${USB_WIFI_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 
 export KCFLAGS='-Wno-error'
 export HOSTCFLAGS='-Wno-error'
@@ -179,6 +265,13 @@ set +e
 eval "./build.sh ${BUILD_ARGS_STR}"
 rc=$?
 set -e
+
+if [[ "$rc" -eq 0 && "${BUILD_MODE}" == "image" && "${IMAGE_PROFILE}" != "stock" && "${IMAGE_PROFILE}" != "off" ]]; then
+  while IFS= read -r image_path; do
+    [[ -n "${image_path}" ]] || continue
+    "${PROJECT_MOUNT}/scripts/postprocess-image-safe-lan.sh" "${image_path}"
+  done < <(find output/images -type f -name '*.img' | sort)
+fi
 
 rm -rf /host-out/output
 cp -a output /host-out/

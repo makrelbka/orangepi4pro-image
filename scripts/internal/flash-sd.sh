@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGES_DIR="${SCRIPT_DIR}/images"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+IMAGES_DIR="${ROOT_DIR}/images"
 
 red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
